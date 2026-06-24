@@ -1,0 +1,23 @@
+# Environment files with API keys — never commit these
+.env
+*.env
+.env.*
+
+# Logs
+*.log
+logs/
+
+# Runtime data
+posted_matches.json
+*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+venv/
+.venv/
+
+# OS
+.DS_Store
