@@ -67,8 +67,8 @@ def should_post(tournament: dict, w_rank: int | None, l_rank: int | None) -> tup
     """
     Returns (post_it, reason_string).
     Premium tiers  → always True.
-    Challenger/ITF → True only when at least one player is ranked ≤ 500.
-    Unknown tier   → apply the top-500 rule to be safe.
+    Challenger/ITF → True only when at least one player is ranked ≤ 100.
+    Unknown tier / no rank data → skip.
     """
     tier = (tournament.get("tier") or "").lower()
     name = (tournament.get("name") or "").lower()
@@ -89,11 +89,13 @@ def should_post(tournament: dict, w_rank: int | None, l_rank: int | None) -> tup
         return True, "Masters name match"
 
     # Everything else (ATP 250, Challenger, ITF W-series, …):
-    # require at least one top-500 player
+    # require at least one top-100 player; skip if no rank known
     ranks = [r for r in (w_rank, l_rank) if r and r > 0]
     best  = min(ranks) if ranks else None
-    if best and best <= 500:
-        return True, f"non-premium with top-500 player (best rank #{best})"
+    if not best:
+        return False, "no ranking data available"
+    if best <= 100:
+        return True, f"non-premium with top-100 player (best rank #{best})"
 
     reason = (
         f"tier={tournament.get('tier')!r} name={tournament.get('name')!r} "
@@ -306,22 +308,32 @@ def generate_post(
 
     if upset:
         instruction = (
-            "You are a professional tennis journalist. Write a SHORT punchy Telegram post about this MAJOR UPSET. "
-            f"Line 1: '🚨 UPSET ALERT | {{Tournament}}'\n"
-            f"Line 2: '{{Winner}} def. {{Loser}} {{score}}'\n"
-            f"Line 3: ranking/seeding gap info\n"
-            f"Line 4: hashtags #TennisUpset {tour_tag}\n"
-            "Max 4 lines. English only."
+            "You are a sharp tennis journalist writing for a viral sports Telegram channel.\n"
+            "Write a punchy breaking-news style post about this upset.\n\n"
+            "Rules:\n"
+            "- Start with 🚨 BREAKING: or 🚨 UPSET: — make the first line a hook that grabs attention\n"
+            "- Mention WHY this is notable — ranking gap, seeding, tournament stage, surface context\n"
+            "- If the loser is a known top player, make THEM the story (\\\"Medvedev crashes out\\\", \\\"Swiatek stunned\\\")\n"
+            "- Add one line of context or a sharp observation (e.g. \\\"First loss on grass this season\\\" or \\\"Knocked out in R1 for the second year running\\\")\n"
+            "- End with relevant hashtags on the last line\n"
+            "- Max 5 lines total. No fluff. No \\\"It was a great match\\\". Punchy and viral.\n"
+            "- English only."
         )
     else:
         instruction = (
-            "You are a professional tennis journalist. Write a SHORT engaging Telegram post about this match. "
-            f"Line 1: '🎾 RESULT | {{Tournament}}'\n"
-            f"Line 2: '{{Winner}} def. {{Loser}} {{score}}'\n"
-            f"Line 3: round + surface\n"
-            f"Line 4: H2H if provided\n"
-            f"Line 5: hashtags #Tennis {tour_tag}\n"
-            "Max 5 lines. Fan-friendly, punchy. English only."
+            "You are a sharp tennis journalist writing for a viral sports Telegram channel.\n"
+            "Write an engaging post about this match result.\n\n"
+            "Rules:\n"
+            "- Start with 🎾 and a hook — NOT just \\\"RESULT |\\\". Make the first line interesting.\n"
+            "  Examples: \\\"🎾 Alcaraz rolls into the QF without dropping a set\\\"\n"
+            "            \\\"🎾 Sabalenka survives a scare to advance at Wimbledon\\\"\n"
+            "            \\\"🎾 Andreeva falls in her first grass court match of the season\\\"\n"
+            "- Line 2: winner def. loser + score\n"
+            "- Line 3: tournament + round + surface (compact, one line)\n"
+            "- Line 4 (optional): one sharp observation, stat, or context detail if interesting. Skip if nothing notable.\n"
+            "- Last line: hashtags\n"
+            "- Max 5 lines. Fan-friendly, punchy. English only.\n"
+            "- NEVER write generic lines like \\\"It was an exciting match\\\" or \\\"Both players showed great skill\\\""
         )
 
     try:
@@ -418,6 +430,12 @@ def check_matches() -> None:
             p1id = m.get("player1Id")
             p2id = m.get("player2Id")
             if not p1id or not p2id:
+                continue
+
+            # Skip doubles matches
+            p1_name = (m.get("player1") or {}).get("name", "")
+            p2_name = (m.get("player2") or {}).get("name", "")
+            if "/" in p1_name or "/" in p2_name:
                 continue
 
             pair = (tour, min(p1id, p2id), max(p1id, p2id))
