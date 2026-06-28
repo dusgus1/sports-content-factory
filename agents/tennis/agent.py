@@ -53,8 +53,8 @@ log = logging.getLogger(__name__)
 _PREMIUM_TIER_KW = (
     "grand slam",
     "masters 1000", "atp masters",      # ATP Masters 1000
-    "atp 500",                           # ATP 500
-    "wta 1000", "wta 500",              # WTA equivalents
+    "atp 500", "atp 250",               # ATP 500 / 250
+    "wta 1000", "wta 500", "wta 250", # WTA equivalents
     "premier mandatory", "premier 5",   # legacy WTA Premier naming
 )
 # Grand Slam tournament names (fallback when tier field is missing/inconsistent)
@@ -88,14 +88,14 @@ def should_post(tournament: dict, w_rank: int | None, l_rank: int | None) -> tup
         # be generous: treat any "Masters" as premium
         return True, "Masters name match"
 
-    # Everything else (ATP 250, Challenger, ITF W-series, …):
-    # require at least one top-100 player; skip if no rank known
+    # Everything else (Challenger, ITF W-series, …):
+    # require at least one top-150 player; skip if no rank known
     ranks = [r for r in (w_rank, l_rank) if r and r > 0]
     best  = min(ranks) if ranks else None
     if not best:
         return False, "no ranking data available"
-    if best <= 100:
-        return True, f"non-premium with top-100 player (best rank #{best})"
+    if best <= 150:
+        return True, f"non-premium with top-150 player (best rank #{best})"
 
     reason = (
         f"tier={tournament.get('tier')!r} name={tournament.get('name')!r} "
@@ -261,6 +261,54 @@ def build_watchlist() -> None:
     log.info("Watch list built: %d player-tour pairs", len(_watchlist))
 
 
+def build_daily_schedule() -> None:
+    """
+    Every morning: fetch today's fixture list from API and log all matches
+    so we can verify the agent is tracking the right games.
+    Runs once per calendar day.
+    """
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if getattr(build_daily_schedule, '_built_date', None) == today_str:
+        return
+    build_daily_schedule._built_date = today_str
+
+    log.info("=== TODAY'S MATCH SCHEDULE (%s) ===", today_str)
+    total = 0
+    for tour in ("atp", "wta"):
+        data = api_get(f"/tennis/v2/{tour}/fixtures/{today_str}")
+        matches = (data.get("data") or []) if data else []
+        tracked = []
+        skipped = []
+        for m in matches:
+            p1 = (m.get("player1") or {}).get("name", "?")
+            p2 = (m.get("player2") or {}).get("name", "?")
+            if "/" in p1 or "/" in p2:
+                continue
+            tid = m.get("tournamentId")
+            t_info = get_tournament(tour, tid) if tid else {}
+            t_name = t_info.get("name", "Unknown")
+            t_tier = t_info.get("tier", "")
+            tier_lower = t_tier.lower()
+            is_premium = any(kw in tier_lower for kw in [
+                "grand slam", "masters", "atp 500", "atp 250",
+                "wta 1000", "wta 500", "wta 250"
+            ])
+            if is_premium:
+                tracked.append(f"  ✅ [{tour.upper()}] {p1} vs {p2} — {t_name} ({t_tier})")
+            else:
+                skipped.append(f"  ⏭ [{tour.upper()}] {p1} vs {p2} — {t_name} ({t_tier})")
+
+        if tracked:
+            log.info("[%s] TRACKING %d matches:", tour.upper(), len(tracked))
+            for line in tracked:
+                log.info(line)
+        if skipped:
+            log.info("[%s] LOW-TIER (will post only if top-150 player): %d matches", tour.upper(), len(skipped))
+        total += len(tracked)
+
+    log.info("=== SCHEDULE DONE — %d premium matches today ===", total)
+
+
 # ── Upset detection ───────────────────────────────────────────────────────────
 def detect_upset(fixture_seed_winner: str | None, fixture_seed_loser: str | None,
                  w_rank: int | None, l_rank: int | None) -> bool:
@@ -321,19 +369,22 @@ def generate_post(
         )
     else:
         instruction = (
-            "You are a sharp tennis journalist writing for a viral sports Telegram channel.\n"
-            "Write an engaging post about this match result.\n\n"
-            "Rules:\n"
-            "- Start with 🎾 and a hook — NOT just \\\"RESULT |\\\". Make the first line interesting.\n"
-            "  Examples: \\\"🎾 Alcaraz rolls into the QF without dropping a set\\\"\n"
-            "            \\\"🎾 Sabalenka survives a scare to advance at Wimbledon\\\"\n"
-            "            \\\"🎾 Andreeva falls in her first grass court match of the season\\\"\n"
-            "- Line 2: winner def. loser + score\n"
-            "- Line 3: tournament + round + surface (compact, one line)\n"
-            "- Line 4 (optional): one sharp observation, stat, or context detail if interesting. Skip if nothing notable.\n"
-            "- Last line: hashtags\n"
-            "- Max 5 lines. Fan-friendly, punchy. English only.\n"
-            "- NEVER write generic lines like \\\"It was an exciting match\\\" or \\\"Both players showed great skill\\\""
+            "You are a sharp tennis journalist writing viral Telegram posts. "
+            "Write a punchy, engaging post about this match result.\n\n"
+            "RULES:\n"
+            "- Line 1: Start with 🎾 + a HOOK headline. Make it interesting and specific.\n"
+            "  If FINAL → focus on title win: '🎾 Humbert claims his first grass title at Eastbourne'\n"
+            "  If top-10 player → make them the story: '🎾 Sabalenka rolls into the QF without dropping serve'\n"
+            "  If comeback → mention it: '🎾 Fokina survives a set down to advance in Mallorca'\n"
+            "  NEVER write 'RESULT |' or just player names as the headline\n"
+            "- Line 2: Winner def. Loser + score\n"
+            "- Line 3: Tournament · Round · Surface (compact, one line)\n"
+            "- Line 4: ONE sharp stat or context. Examples:\n"
+            "  'Humbert is now 5-0 in grass-court semifinals this season'\n"
+            "  'Keys wins her first title since 2019'\n"
+            "  Skip if nothing notable.\n"
+            "- Last line: hashtags only\n"
+            "- MAX 5 lines. No filler. No 'great match'. Punchy. English only.\n"
         )
 
     try:
@@ -367,16 +418,21 @@ def generate_post(
 def _fallback_post(w_name, l_name, score, t_name, round_name,
                    surface, h2h, w_rank, l_rank, upset, tour_tag) -> str:
     if upset:
-        lines = [f"🚨 UPSET ALERT | {t_name}", f"{w_name} def. {l_name} {score}"]
-        if w_rank and l_rank:
-            lines.append(f"{l_name.split()[-1]} #{l_rank} → {w_name.split()[-1]} #{w_rank}")
-        lines.append(f"#TennisUpset {tour_tag}")
+        lines = [
+            f"🚨 UPSET: {l_name} ({f'#{l_rank}' if l_rank else 'seeded'}) stunned by {w_name} ({f'#{w_rank}' if w_rank else 'unranked'})",
+            f"{w_name} def. {l_name} {score}",
+            f"{t_name}",
+            f"#TennisUpset {tour_tag}"
+        ]
     else:
-        lines = [f"🎾 RESULT | {t_name}", f"{w_name} def. {l_name} {score}"]
-        meta = " | ".join(filter(None, [
-            f"Round: {round_name}" if round_name else "",
-            f"Surface: {surface}"  if surface    else "",
-        ]))
+        if round_name and "final" in round_name.lower():
+            headline = f"{w_name} wins the {t_name} title"
+        elif round_name and surface:
+            headline = f"{w_name} advances at {t_name}"
+        else:
+            headline = f"{w_name} beats {l_name} at {t_name}"
+        lines = [f"🎾 {headline}", f"{w_name} def. {l_name} {score}"]
+        meta = " · ".join(filter(None, [round_name, surface]))
         if meta:
             lines.append(meta)
         if h2h:
@@ -408,6 +464,7 @@ def check_matches() -> None:
     posted    = load_posted()
 
     build_watchlist()
+    build_daily_schedule()
 
     seen_pairs: set = set()  # canonical (tour, min_id, max_id) — avoid double-posting same match
     new_posts = 0
@@ -521,6 +578,7 @@ if __name__ == "__main__":
     log.info("Tennis AI Agent starting up...")
     get_round_names()
     check_matches()
+    log.info("Startup complete. Monitoring every 5 minutes.")
 
     scheduler = BlockingScheduler(timezone="UTC")
     scheduler.add_job(
